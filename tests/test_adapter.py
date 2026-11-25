@@ -1853,3 +1853,98 @@ async def test_state_file_path_is_redacted_in_persist_failure_logs(monkeypatch, 
         adapter._persist_last_rowid()
     assert "/Users/exampleuser" not in caplog.text
     assert "[REDACTED_PATH]" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Cursor advances after dispatch; stale catch-up guard
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_cursor_not_advanced_when_dispatch_cancelled(monkeypatch, tmp_path):
+    adapter = make_adapter(tmp_path, binary="imsg", allowed_handles=["+12025550101"],
+                           send_read_receipts=False)
+    adapter._last_rowid = 10
+
+    async def cancelled(message_event):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(adapter, "handle_message", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await adapter._process_watch_event(
+            {"id": 11, "chat_id": 3, "sender": "+12025550101", "text": "hi"})
+    assert adapter._last_rowid == 10  # row 11 replays on restart
+
+
+@pytest.mark.asyncio
+async def test_cursor_advances_after_failed_dispatch(monkeypatch, tmp_path):
+    adapter = make_adapter(tmp_path, binary="imsg", allowed_handles=["+12025550101"],
+                           send_read_receipts=False)
+
+    async def boom(message_event):
+        raise RuntimeError("poison row")
+
+    monkeypatch.setattr(adapter, "handle_message", boom)
+    with pytest.raises(RuntimeError):
+        await adapter._process_watch_event(
+            {"id": 12, "chat_id": 3, "sender": "+12025550101", "text": "hi"})
+    assert adapter._last_rowid == 12  # no replay loop on a poison row
+
+
+@pytest.mark.asyncio
+async def test_cursor_advances_after_handoff(monkeypatch, tmp_path):
+    adapter = make_adapter(tmp_path, binary="imsg", allowed_handles=["+12025550101"],
+                           send_read_receipts=False)
+    seen = []
+
+    async def fake_handle(message_event):
+        seen.append(adapter._last_rowid)  # cursor not yet advanced during handoff
+
+    monkeypatch.setattr(adapter, "handle_message", fake_handle)
+    await adapter._process_watch_event(
+        {"id": 13, "chat_id": 3, "sender": "+12025550101", "text": "hi"})
+    assert seen == [None]
+    assert adapter._last_rowid == 13
+    assert make_adapter(tmp_path)._last_rowid == 13  # persisted
+
+
+@pytest.mark.asyncio
+async def test_stale_inbound_skipped_but_cursor_advances(monkeypatch, tmp_path):
+    adapter = make_adapter(tmp_path, binary="imsg", allowed_handles=["+12025550101"],
+                           send_read_receipts=False, max_inbound_age=3600)
+    handled = []
+
+    async def fake_handle(message_event):
+        handled.append(message_event)
+
+    monkeypatch.setattr(adapter, "handle_message", fake_handle)
+    await adapter._process_watch_event({"id": 20, "chat_id": 3, "sender": "+12025550101",
+                                        "text": "old", "created_at": "2020-01-01T00:00:00Z"})
+    assert handled == []
+    assert adapter._last_rowid == 20
+
+
+@pytest.mark.asyncio
+async def test_fresh_and_undated_inbound_not_stale(monkeypatch, tmp_path):
+    import datetime as _dt
+    adapter = make_adapter(tmp_path, binary="imsg", allowed_handles=["+12025550101"],
+                           send_read_receipts=False, max_inbound_age=3600)
+    handled = []
+
+    async def fake_handle(message_event):
+        handled.append(message_event)
+
+    monkeypatch.setattr(adapter, "handle_message", fake_handle)
+    now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    await adapter._process_watch_event({"id": 21, "chat_id": 3, "sender": "+12025550101",
+                                        "text": "new", "created_at": now})
+    await adapter._process_watch_event({"id": 22, "chat_id": 3, "sender": "+12025550101",
+                                        "text": "undated"})
+    assert len(handled) == 2
+
+
+def test_max_inbound_age_defaults_off_and_reads_env(monkeypatch, tmp_path):
+    assert make_adapter(tmp_path).max_inbound_age == 0
+    monkeypatch.setenv("IMSG_MAX_INBOUND_AGE", "900")
+    assert make_adapter(tmp_path).max_inbound_age == 900
+    monkeypatch.setenv("IMSG_MAX_INBOUND_AGE", "nonsense")
+    assert make_adapter(tmp_path).max_inbound_age == 0

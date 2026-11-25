@@ -181,6 +181,7 @@ precedence over YAML.
 | `IMSG_PARTICIPANT_VALIDATION` / `IMSG_PARTICIPANT_CACHE_TTL` | `fast` or `strict`, plus cache seconds. |
 | `IMSG_DEBOUNCE` | Watch debounce such as `500ms`. |
 | `IMSG_STATE_FILE` | Recovery cursor override. |
+| `IMSG_MAX_INBOUND_AGE` | Seconds; older inbound rows are skipped during catch-up. Off by default. |
 | `IMSG_PHONE_MIN_DIGITS` / `IMSG_DEFAULT_COUNTRY_CODE` | Standalone bare-number normalization. |
 | `IMSG_COMMAND_TIMEOUT` | Timeout for bounded commands; default 30 seconds. |
 | `IMSG_POLL_VOTES_DM` | Deliver direct-message poll vote events. |

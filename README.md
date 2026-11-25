@@ -166,6 +166,7 @@ IMCore behavior. On a normal SIP-enabled Mac, use the public-only settings in
 | `IMSG_PARTICIPANT_CACHE_TTL` | Number of seconds to cache strict participant lookups. The default is `300`. |
 | `IMSG_DEBOUNCE` | Upstream watch debounce, such as `500ms`. |
 | `IMSG_STATE_FILE` | Optional path for the resumable last-rowid cursor. |
+| `IMSG_MAX_INBOUND_AGE` | Skip inbound rows older than this many seconds, so catch-up after long downtime does not turn a backlog into agent turns. `0` or unset disables the guard. |
 | `IMSG_PHONE_MIN_DIGITS` | Minimum length at which an all-digit target is treated as a phone number. The default is `10`. |
 | `IMSG_DEFAULT_COUNTRY_CODE` | Country code added to a bare 10-digit number. The default is `1`. |
 | `IMSG_COMMAND_TIMEOUT` | Timeout in seconds for bounded CLI commands. The default is `30`; the supervised watch process is excluded. |

@@ -90,6 +90,10 @@ optional_env:
     description: "Optional path for the resumable last-rowid cursor."
     prompt: "State file path"
     password: false
+  - name: IMSG_MAX_INBOUND_AGE
+    description: "Skip inbound rows older than this many seconds (catch-up after downtime). 0 or unset disables."
+    prompt: "Max inbound age (seconds)"
+    password: false
   - name: IMSG_MENTION_PATTERNS
     description: "JSON array or comma/newline-separated regular expressions used for group mentions."
     prompt: "Mention patterns"

@@ -26,6 +26,7 @@ import sys
 import tempfile
 import time
 from collections import OrderedDict, deque
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from gateway.config import PlatformConfig
@@ -58,6 +59,7 @@ from .config import (
     ENV_GROUP_ALLOWED_USERS,
     ENV_GROUP_SILENCE,
     ENV_HOME_CHANNEL,
+    ENV_MAX_INBOUND_AGE,
     ENV_MENTION_PATTERNS,
     ENV_PARTICIPANT_CACHE_TTL,
     ENV_PARTICIPANT_VALIDATION,
@@ -147,6 +149,23 @@ def _event_sender(event: dict[str, Any]) -> str:
 def _event_text(event: dict[str, Any]) -> str:
     value = _event_get(event, "text", "body", "message", "message_text", default="")
     return str(value or "")
+
+
+def _event_created_at(event: dict[str, Any]) -> Optional[float]:
+    """Epoch seconds of the row's ``created_at`` (ISO8601), or None."""
+    value = _event_get(event, "created_at", "createdAt", "date")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 
 def _event_guid(event: dict[str, Any]) -> Optional[str]:
@@ -405,6 +424,13 @@ class ImsgAdapter(BasePlatformAdapter):
         except (TypeError, ValueError):
             self.command_timeout = 30.0
         self.state_file = get_state_path(extra)
+        try:
+            self.max_inbound_age = max(
+                0.0,
+                float(extra.get("max_inbound_age") or os.getenv(ENV_MAX_INBOUND_AGE) or 0),
+            )
+        except (TypeError, ValueError):
+            self.max_inbound_age = 0.0
         self.allow_all = _as_bool(extra.get("allow_all", os.getenv(ENV_ALLOW_ALL_USERS)), False)
         self.allowed_handles = _csv_set(
             extra.get("allowed_handles")
@@ -1144,11 +1170,55 @@ class ImsgAdapter(BasePlatformAdapter):
             logger.debug("[imsg] watch stderr drain ended: %s", _redact(exc))
 
     async def _process_watch_event(self, event: dict[str, Any]) -> None:
+        """Dispatch one watch row, then advance the durable rowid cursor.
+
+        The cursor moves only after dispatch returns (the row reached Hermes'
+        queue or was deliberately filtered) or raises an ordinary exception
+        (so a poison row cannot wedge the stream in a replay loop).  If the
+        task is cancelled mid-dispatch, e.g. gateway shutdown, or the process
+        dies, the cursor stays put and ``imsg watch --since-rowid`` replays
+        the row on the next start.  Delivery to Hermes is therefore
+        at-least-once at the handoff boundary; Hermes runs the agent turn in
+        its own background task, which this cursor does not cover.
+        """
         rowid = _event_rowid(event)
+        try:
+            await self._dispatch_watch_event(event)
+        except asyncio.CancelledError:
+            raise  # leave the cursor so this row replays after restart
+        except Exception:
+            self._advance_cursor(rowid)
+            raise
+        self._advance_cursor(rowid)
+
+    def _advance_cursor(self, rowid: Optional[int]) -> None:
         if rowid is not None and (self._last_rowid is None or rowid > self._last_rowid):
             self._last_rowid = rowid
             self._persist_last_rowid()
+
+    def _is_stale_inbound(self, event: dict[str, Any]) -> bool:
+        """True when ``max_inbound_age`` is set and the row is older than it.
+
+        Guards the catch-up replay after long downtime: without it, every
+        backlog row since the saved cursor becomes a fresh agent turn.  Rows
+        without a parseable timestamp are never treated as stale.
+        """
+        if self.max_inbound_age <= 0:
+            return False
+        created = _event_created_at(event)
+        if created is None:
+            return False
+        return (time.time() - created) > self.max_inbound_age
+
+    async def _dispatch_watch_event(self, event: dict[str, Any]) -> None:
         if self.reaction_notifications == "off" and _is_reaction_event(event):
+            return
+        if self._is_stale_inbound(event):
+            logger.info(
+                "[imsg] skipped stale inbound row %s (older than max_inbound_age=%ss)",
+                _event_rowid(event),
+                int(self.max_inbound_age),
+            )
             return
         self._remember_event_ids(event)
         if not await self._should_process_async(event):
